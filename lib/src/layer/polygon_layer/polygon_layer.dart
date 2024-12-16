@@ -128,20 +128,23 @@ class _PolygonLayerState<R extends Object> extends State<PolygonLayer<R>>
 
     final camera = MapCamera.of(context);
 
-    final culled = !widget.polygonCulling
+    // Initial culling by bounding box in lat/lng space (as before).
+    final culledByLatLng = !widget.polygonCulling
         ? simplifiedElements.toList()
         : simplifiedElements
-            .where(
-              (p) => p.polygon.boundingBox.isOverlapping(camera.visibleBounds),
-            )
+            .where((p) => p.polygon.boundingBox.isOverlapping(camera.visibleBounds))
             .toList();
+
+    // Refine culling by checking the projected bounding box of the polygon
+    // against the current viewport. Only polygons that appear on-screen are retained.
+    final viewportCulled = _cullByViewport(culledByLatLng, camera);
 
     final triangles = !widget.useAltRendering
         ? null
         : List.generate(
-            culled.length,
+            viewportCulled.length,
             (i) {
-              final culledPolygon = culled[i];
+              final culledPolygon = viewportCulled[i];
 
               final points = culledPolygon.holePoints.isEmpty
                   ? culledPolygon.points
@@ -168,7 +171,7 @@ class _PolygonLayerState<R extends Object> extends State<PolygonLayer<R>>
     return MobileLayerTransformer(
       child: CustomPaint(
         painter: _PolygonPainter(
-          polygons: culled,
+          polygons: viewportCulled,
           triangles: triangles,
           camera: camera,
           polygonLabels: widget.polygonLabels,
@@ -179,6 +182,36 @@ class _PolygonLayerState<R extends Object> extends State<PolygonLayer<R>>
         size: camera.size,
       ),
     );
+  }
+
+  // This method projects the polygon bounding box into screen coordinates
+  // and checks if it intersects the visible map viewport in pixel space.
+  Iterable<_ProjectedPolygon<R>> _cullByViewport(
+    List<_ProjectedPolygon<R>> polygons,
+    MapCamera camera,
+  ) {
+    if (!widget.polygonCulling) return polygons;
+
+    final mapSize = camera.size;
+    final viewportRect = Rect.fromLTWH(0, 0, mapSize.width, mapSize.height);
+
+    return polygons.where((projectedPolygon) {
+      final bbox = projectedPolygon.polygon.boundingBox;
+
+      final swPixel = camera.project(bbox.southWest);
+      final nePixel = camera.project(bbox.northEast);
+
+      final origin = camera.projectAtZoom(camera.center) - camera.size.center(Offset.zero);
+      final swOffset = (swPixel - origin);
+      final neOffset = (nePixel - origin);
+
+      final polygonRect = Rect.fromPoints(
+        Offset(min(swOffset.dx, neOffset.dx), min(swOffset.dy, neOffset.dy)),
+        Offset(max(swOffset.dx, neOffset.dx), max(swOffset.dy, neOffset.dy)),
+      );
+
+      return polygonRect.overlaps(viewportRect);
+    });
   }
 
   Iterable<int> _generateHolesIndices(_ProjectedPolygon<R> polygon) sync* {
